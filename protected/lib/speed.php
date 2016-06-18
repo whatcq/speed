@@ -23,7 +23,7 @@ if(!empty($GLOBALS['rewrite'])){
 		if(0!==stripos($rule, 'http://'))
 			$rule = 'http://'.$_SERVER['HTTP_HOST'].rtrim(dirname($_SERVER["SCRIPT_NAME"]), '/\\') .'/'.$rule;
 		$rule = '/'.str_ireplace(array('\\\\', 'http://', '/', '<', '>',  '.'), 
-			array('', '', '\/', '(?<', '>\w+)', '\.'), $rule).'/i';
+			array('', '', '\/', '(?P<', '>\w+)', '\.'), $rule).'/i';
 		if(preg_match($rule, 'http://'.$_SERVER['HTTP_HOST'].$_SERVER['REQUEST_URI'], $matchs)){
 			$route = explode("/", $mapper);
 			
@@ -45,12 +45,6 @@ $__module     = isset($_REQUEST['m']) ? strtolower($_REQUEST['m']) : '';
 $__controller = isset($_REQUEST['c']) ? strtolower($_REQUEST['c']) : 'main';
 $__action     = isset($_REQUEST['a']) ? strtolower($_REQUEST['a']) : 'index';
 
-if(!empty($__module)){
-	if(!is_available_classname($__module))err("Err: Module name '$__module' is not correct!");
-	if(!is_dir(APP_DIR.DS.'protected'.DS.'controller'.DS.$__module))err("Err: Module '$__module' is not exists!");
-}
-if(!is_available_classname($__controller))err("Err: Controller name '$__controller' is not correct!");
-
 spl_autoload_register('inner_autoload');
 function inner_autoload($class){
 	GLOBAL $__module;
@@ -60,11 +54,14 @@ function inner_autoload($class){
 			include $file;
 			return;
 		}
-		$lowerfile = strtolower($file);
-		foreach(glob(APP_DIR.DS.'protected'.DS.$dir.DS.'*.php') as $file){
-			if(strtolower($file) === $lowerfile){
-				include $file;
-				return;
+		$phpfiles = glob(APP_DIR.DS.'protected'.DS.$dir.DS.'*.php');
+		if(is_array($phpfiles)){
+			$lowerfile = strtolower($file);
+			foreach($phpfiles as $file){
+				if(strtolower($file) === $lowerfile){
+					include $file;
+					return;
+				}
 			}
 		}
 	}
@@ -73,17 +70,13 @@ function inner_autoload($class){
 $controller_name = $__controller.'Controller';
 $action_name = 'action'.$__action;
 
-if(!method_exists($controller_name, $action_name)) {
-	if(!method_exists('BaseController', 'err404')){
-		if(!class_exists($controller_name, true)) {
-			err("Err: Controller '$controller_name' is not exists!");
-		}else{
-			err("Err: Method '$action_name' of '$controller_name' is not exists!");
-		}
-	}else{
-		BaseController::err404($__controller, $__action);
-	}
+if(!empty($__module)){
+	if(!is_available_classname($__module))_err_router("Err: Module '$__module' is not correct!");
+	if(!is_dir(APP_DIR.DS.'protected'.DS.'controller'.DS.$__module))_err_router("Err: Module '$__module' is not exists!");
 }
+if(!is_available_classname($__controller))_err_router("Err: Controller '$controller_name' is not correct!");
+if(!class_exists($controller_name, true))_err_router("Err: Controller '$controller_name' is not exists!");
+if(!method_exists($controller_name, $action_name))_err_router("Err: Method '$action_name' of '$controller_name' is not exists!");
 
 $controller_obj = new $controller_name();
 $controller_obj->$action_name();
@@ -115,7 +108,7 @@ function url($c = 'main', $a = 'index', $param = array()){
 		if(!isset($urlArray[$url])){
 			foreach($GLOBALS['rewrite'] as $rule => $mapper){
 				$mapper = '/'.str_ireplace(array('/', '<a>', '<c>', '<m>'), 
-					array('\/', '(?<a>\w+)', '(?<c>\w+)', '(?<m>\w+)'), $mapper).'/i';
+					array('\/', '(?P<a>\w+)', '(?P<c>\w+)', '(?P<m>\w+)'), $mapper).'/i';
 				
 				if(preg_match($mapper, $route, $matchs)){
 					$urlArray[$url] = str_ireplace(array('<a>', '<c>', '<m>'), array($a, $c, $m), $rule);
@@ -157,10 +150,11 @@ function is_available_classname($name){
 	return preg_match('/[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*/', $name);
 }
 
-function arg($name = null, $default = null) {
+function arg($name = null, $default = null, $trim = false) {
 	if($name){
 		if(!isset($_REQUEST[$name]))return $default;
 		$arg = $_REQUEST[$name];
+		if($trim)$arg = trim($arg);
 	}else{
 		$arg = $_REQUEST;
 	}
@@ -213,6 +207,8 @@ class Model{
 		$sql = ' FROM '.$this->table_name.$conditions["_where"];
 		if(is_array($limit)){
 			$total = $this->query('SELECT COUNT(*) as M_COUNTER '.$sql, $conditions["_bindParams"]);
+			if(!isset($total[0]['M_COUNTER']) || $total[0]['M_COUNTER'] == 0)return false;
+			
 			$limit = $limit + array(1, 10, 10);
 			$limit = $this->pager($limit[0], $limit[1], $limit[2], $total[0]['M_COUNTER']);
 			$limit = empty($limit) ? '' : ' LIMIT '.$limit['offset'].','.$limit['limit'];			
@@ -310,7 +306,18 @@ class Model{
 		}
 		
 		if(is_array($params) && !empty($params)){
-			foreach($params as $k=>&$v) $sth->bindParam($k, $v);
+			foreach($params as $k => &$v){
+				if(is_int($v)){
+					$data_type = PDO::PARAM_INT;
+				}elseif(is_bool($v)){
+					$data_type = PDO::PARAM_BOOL;
+				}elseif(is_null($v)){
+					$data_type = PDO::PARAM_NULL;
+				}else{
+					$data_type = PDO::PARAM_STR;
+				}
+				$sth->bindParam($k, $v, $data_type);
+			}
 		}
 
 		if($sth->execute())return $readonly ? $sth->fetchAll(PDO::FETCH_ASSOC) : $sth->rowCount();
@@ -394,8 +401,15 @@ class View{
 		$template_data = '<?php if(!class_exists("View", false)) exit("no direct access allowed");?>'.$template_data;
 		
 		$this->_clear_compliedfile($tempalte_name);
-		file_put_contents($complied_file, $template_data);
-		
+		$tmp_file = $complied_file.uniqid('_tpl', true);
+		if (!file_put_contents($tmp_file, $template_data)) err('Err: File "'.$tmp_file.'" can not be generated.');
+
+		$success = @rename($tmp_file, $complied_file);
+		if(!$success){
+			if(is_file($complied_file)) @unlink($complied_file);
+			$success = @rename($tmp_file, $complied_file);
+		}
+		if(!$success) err('Err: File "'.$complied_file.'" can not be generated.');
 		return $complied_file;
 	}
 
@@ -465,7 +479,14 @@ class View{
 		}
 	}
 }
-
+function _err_router($msg){
+	Global $__module, $__controller, $__action;
+	if(!method_exists('BaseController', 'err404')){
+		err($msg);
+	}else{
+		BaseController::err404($__module, $__controller, $__action, $msg);
+	}
+}
 function _err_handle($errno, $errstr, $errfile, $errline){
 	if(0 === error_reporting())return false;
 	$msg = "ERROR";
@@ -476,6 +497,7 @@ function _err_handle($errno, $errstr, $errfile, $errline){
 	err("$msg: $errstr in $errfile on line $errline");
 }
 function err($msg){
+	$msg = htmlspecialchars($msg);
 	$traces = debug_backtrace();
 	if(!$GLOBALS['debug']){
 		header('HTTP/1.1 500 Internal Server Error');
